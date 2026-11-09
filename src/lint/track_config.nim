@@ -1,4 +1,4 @@
-import std/[json, os, sets, strformat, strutils, tables]
+import std/[algorithm, json, os, sets, strformat, strutils, tables]
 import ".."/[helpers, types_track_config]
 import "."/validators
 
@@ -343,7 +343,15 @@ proc checkPractices(practiceExercises: seq[PracticeExercise];
     let slugs = joinWithNewlines(practicesNotInTopLevelConcepts)
     warn(msg, slugs)
 
-  for conceptPracticed, count in countConceptsPracticed.pairs:
+  # Sort by Concept slug, so that the output doesn't depend on the iteration
+  # order of the `CountTable`.
+  var conceptsPracticed = newSeqOfCap[string](countConceptsPracticed.len)
+  for conceptPracticed in countConceptsPracticed.keys:
+    conceptsPracticed.add conceptPracticed
+  sort conceptsPracticed
+
+  for conceptPracticed in conceptsPracticed:
+    let count = countConceptsPracticed[conceptPracticed]
     if count > 10:
       let msg = &"The Concept {q conceptPracticed} appears {count} times in " &
                  "the `practices` arrays of user-facing Practice Exercises, " &
