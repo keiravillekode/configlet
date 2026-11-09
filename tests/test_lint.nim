@@ -1,9 +1,38 @@
-import std/[json, os, strutils, unittest]
-import helpers
+import std/[algorithm, json, os, sets, strutils, unittest]
+import helpers, types_track_config
 import lint/validators
 import lint/approaches_and_articles {.all.}
 import lint/docs
-from lint/track_config {.all.} import isValidPracticeExercise
+from lint/track_config {.all.} import checkPractices, isValidPracticeExercise
+
+when defined(windows):
+  proc c_dup(fd: cint): cint {.importc: "_dup", header: "<io.h>".}
+  proc c_dup2(fd, fd2: cint): cint {.importc: "_dup2", header: "<io.h>".}
+  proc c_close(fd: cint): cint {.importc: "_close", header: "<io.h>".}
+else:
+  proc c_dup(fd: cint): cint {.importc: "dup", header: "<unistd.h>".}
+  proc c_dup2(fd, fd2: cint): cint {.importc: "dup2", header: "<unistd.h>".}
+  proc c_close(fd: cint): cint {.importc: "close", header: "<unistd.h>".}
+
+template captureStdout(body: untyped): string =
+  ## Runs `body`, and returns what it wrote to stdout.
+  let capturePath = getTempDir() / "configlet_test_lint_stdout.txt"
+  stdout.flushFile()
+  let stdoutFd = getFileHandle(stdout)
+  let savedFd = c_dup(stdoutFd)
+  doAssert savedFd >= 0
+  let captureFile = open(capturePath, fmWrite)
+  doAssert c_dup2(getFileHandle(captureFile), stdoutFd) >= 0
+  try:
+    body
+  finally:
+    stdout.flushFile()
+    doAssert c_dup2(savedFd, stdoutFd) >= 0
+    discard c_close(savedFd)
+    captureFile.close()
+  let captured = readFile(capturePath)
+  removeFile capturePath
+  captured
 
 proc testIsKebabCase =
   suite "isKebabCase":
@@ -440,6 +469,46 @@ proc testTrackDocsExist =
 
     removeDir trackDir
 
+proc testCheckPractices =
+  suite "checkPractices":
+    test "warns about over-practiced Concepts in order of Concept slug":
+      const
+        overPracticed = ["strings", "arithmetic", "loops", "conditionals",
+                         "recursion", "booleans", "maps"]
+        notOverPracticed = "lists"
+      var practiceExercises = newSeq[PracticeExercise]()
+      for i in 1..11:
+        var practices = initOrderedSet[string]()
+        for c in overPracticed:
+          practices.incl c
+        if i <= 10:
+          practices.incl notOverPracticed
+        practiceExercises.add PracticeExercise(slug: Slug("exercise-" & $i),
+                                               practices: practices,
+                                               status: sActive)
+      var conceptSlugs = initHashSet[string]()
+      for c in overPracticed:
+        conceptSlugs.incl c
+      conceptSlugs.incl notOverPracticed
+
+      var b = true
+      let output = captureStdout:
+        checkPractices(practiceExercises, conceptSlugs, b,
+                       Path("config.json"))
+      const marker = "The Concept `"
+      var warned = newSeq[string]()
+      for line in output.splitLines():
+        let start = line.find(marker)
+        if start >= 0:
+          let rest = line[start..^1]
+          warned.add rest[0 ..< rest.find(" in ")]
+      var expected = newSeq[string]()
+      for c in overPracticed.sorted():
+        expected.add "The Concept `" & c & "` appears 11 times"
+      check:
+        warned == expected
+        b # These are warnings, not errors.
+
 proc main =
   testIsKebabCase()
   testIsUuidV4()
@@ -448,6 +517,7 @@ proc main =
   testCountLinesWithoutCodeFence()
   testSpecificationKey()
   testTrackDocsExist()
+  testCheckPractices()
 
 main()
 {.used.}
