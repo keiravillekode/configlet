@@ -5,6 +5,14 @@ import lint/approaches_and_articles {.all.}
 import lint/docs
 from lint/track_config {.all.} import isValidPracticeExercise
 
+when not defined(windows):
+  import std/[algorithm, posix, sequtils, sets, strformat]
+  import types_track_config
+  from lint/track_config {.all.} import checkPractices,
+      checkExerciseSlugsAndForegone, checkFilePatternsOverlap,
+      checkExerciseDirsAndTrackConfigAreInSync,
+      checkConceptDirsAndTrackConfigAreInSync
+
 proc testIsKebabCase =
   suite "isKebabCase":
     test "invalid kebab-case strings":
@@ -440,6 +448,123 @@ proc testTrackDocsExist =
 
     removeDir trackDir
 
+when not defined(windows):
+  template captureStdout(body: untyped): string =
+    ## Runs `body`, and returns what it wrote to stdout.
+    let capturePath = getTempDir() / "configlet_test_lint_stdout.txt"
+    let captureFile = open(capturePath, fmWrite)
+    stdout.flushFile()
+    let savedFd = dup(STDOUT_FILENO)
+    doAssert savedFd >= 0
+    doAssert dup2(getFileHandle(captureFile), STDOUT_FILENO) >= 0
+    try:
+      body
+    finally:
+      stdout.flushFile()
+      doAssert dup2(savedFd, STDOUT_FILENO) >= 0
+      discard close(savedFd)
+      captureFile.close()
+    let captured = readFile(capturePath)
+    removeFile capturePath
+    captured
+
+  func quotedAfter(output, prefix: string): seq[string] =
+    ## Returns, for each line of `output` that contains `prefix`, the
+    ## backticked value that immediately follows `prefix`.
+    result = @[]
+    for line in output.splitLines():
+      let i = line.find(prefix)
+      if i >= 0:
+        let start = i + prefix.len
+        result.add line[start ..< line.find('`', start)]
+
+  const unsortedSlugs = ["zebra", "apple", "mango", "kiwi", "banana", "cherry",
+                         "lemon", "date", "fig", "grape"]
+  let sortedSlugs = unsortedSlugs.sorted()
+
+  proc testSortedOutput =
+    suite "lint output does not depend on hash iteration order":
+      test "over-practiced Concepts are sorted":
+        var practices = initOrderedSet[string]()
+        for slug in unsortedSlugs:
+          practices.incl slug
+        var practiceExercises = newSeq[PracticeExercise]()
+        for i in 1..11:
+          practiceExercises.add PracticeExercise(slug: Slug(&"exercise-{i}"),
+                                                 practices: practices,
+                                                 status: sActive)
+        var b = true
+        let output = captureStdout:
+          checkPractices(practiceExercises, unsortedSlugs.toHashSet, b,
+                         Path("config.json"))
+        check:
+          output.quotedAfter("The Concept `") == sortedSlugs
+          b # These are warnings, not errors.
+
+      test "slugs used by both a Concept and a Practice Exercise are sorted":
+        var exercises = Exercises(practice: @[PracticeExercise(
+            slug: Slug("hello-world"))])
+        for slug in unsortedSlugs:
+          exercises.`concept`.add ConceptExercise(slug: Slug(slug))
+          exercises.practice.add PracticeExercise(slug: Slug(slug))
+        var b = true
+        let output = captureStdout:
+          checkExerciseSlugsAndForegone(exercises, b, Path("config.json"))
+        check:
+          output.quotedAfter("The slug `") == sortedSlugs
+          not b
+
+      test "overlapping file patterns are sorted":
+        let filePatterns = FilePatterns(solution: @unsortedSlugs,
+                                        test: @unsortedSlugs)
+        var b = true
+        let output = captureStdout:
+          checkFilePatternsOverlap(filePatterns, "nim", b, Path("config.json"))
+        check:
+          output.quotedAfter("but the `") == sortedSlugs
+          not b
+
+      let trackDir = getTempDir() / "configlet_test_lint_sorted_output"
+      let dirSlugs = unsortedSlugs.mapIt(it & "-dir")
+      let configSlugs = unsortedSlugs.mapIt(it & "-config")
+      removeDir trackDir
+      for slug in dirSlugs:
+        createDir trackDir / "exercises" / "practice" / slug
+        createDir trackDir / "concepts" / slug
+      var practiceExercises = newJArray()
+      var concepts = newJArray()
+      for slug in configSlugs:
+        practiceExercises.add %*{"slug": slug}
+        concepts.add %*{"slug": slug}
+      let data = %*{
+        "exercises": {"concept": [], "practice": practiceExercises},
+        "concepts": concepts,
+      }
+
+      test "exercise directories not in sync with the track config are sorted":
+        var b = true
+        let output = captureStdout:
+          checkExerciseDirsAndTrackConfigAreInSync(Path(trackDir), data, b,
+                                                   Path("config.json"))
+        check:
+          output.quotedAfter("contains a directory named `") ==
+            dirSlugs.sorted()
+          output.quotedAfter("The `") == configSlugs.sorted()
+          not b
+
+      test "concept directories not in sync with the track config are sorted":
+        var b = true
+        let output = captureStdout:
+          checkConceptDirsAndTrackConfigAreInSync(Path(trackDir), data, b,
+                                                  Path("config.json"))
+        check:
+          output.quotedAfter("contains a directory named `") ==
+            dirSlugs.sorted()
+          output.quotedAfter("The `") == configSlugs.sorted()
+          not b
+
+      removeDir trackDir
+
 proc main =
   testIsKebabCase()
   testIsUuidV4()
@@ -448,6 +573,8 @@ proc main =
   testCountLinesWithoutCodeFence()
   testSpecificationKey()
   testTrackDocsExist()
+  when not defined(windows):
+    testSortedOutput()
 
 main()
 {.used.}
